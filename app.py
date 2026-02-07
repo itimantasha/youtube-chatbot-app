@@ -1,6 +1,5 @@
 import os
 import streamlit as st
-
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
@@ -17,7 +16,6 @@ st.title("🎥 YouTube Video Q&A (RAG App)")
 # Get API Key from Render ENV
 # -----------------------
 api_key = os.getenv("OPENAI_API_KEY")
-
 if not api_key:
     st.error("OPENAI_API_KEY not found. Set it in Render Environment Variables.")
     st.stop()
@@ -43,23 +41,23 @@ def build_vector_store(video_id):
         api = YouTubeTranscriptApi()
         transcript_list = api.fetch(video_id, languages=["en"])
     except TranscriptsDisabled:
-        st.error("Transcript is disabled for this video.")
+        st.error("This video has no captions available.")
         return None
     except Exception as e:
         st.error(f"Error fetching transcript: {e}")
         return None
 
+    # flatten transcript to plain text
     transcript = " ".join(chunk.text for chunk in transcript_list)
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200
-    )
-
+    # Split text
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     docs = splitter.create_documents([transcript])
 
+    # Embeddings
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
 
+    # Create vector store
     return FAISS.from_documents(docs, embeddings)
 
 # -----------------------
@@ -67,10 +65,9 @@ def build_vector_store(video_id):
 # -----------------------
 if url:
     video_id = extract_video_id(url)
-
     with st.spinner("Processing transcript..."):
         vector_store = build_vector_store(video_id)
-        if not vector_store:
+        if vector_store is None:
             st.stop()
         retriever = vector_store.as_retriever()
 
@@ -91,8 +88,6 @@ Question:
 {question}
 """
 
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
-
+        llm = ChatOpenAI(model="gpt-4o-mini")
         answer = llm.invoke(prompt)
-
         st.success(answer.content)
