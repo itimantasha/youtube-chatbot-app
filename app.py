@@ -4,90 +4,86 @@ from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import FAISS
-from langchain_core.prompts import PromptTemplate
 
-# -----------------------
-# Page config
-# -----------------------
-st.set_page_config(page_title="YouTube RAG App", layout="wide")
-st.title("🎥 YouTube Video Q&A (RAG App)")
+# -----------------------------
+# Page Config
+# -----------------------------
+st.set_page_config(page_title="YouTube RAG Bot", layout="wide")
+st.title("🎥 YouTube Video Q&A Bot (RAG)")
+st.write("Ask questions directly from any YouTube video's transcript.")
 
-# -----------------------
-# Get API Key from Render ENV
-# -----------------------
+# -----------------------------
+# API Key from Render ENV
+# -----------------------------
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
-    st.error("OPENAI_API_KEY not found. Set it in Render Environment Variables.")
+    st.error("OPENAI_API_KEY not found! Set it in Render Environment Variables.")
     st.stop()
+os.environ["OPENAI_API_KEY"] = api_key
 
-# -----------------------
-# Input
-# -----------------------
-url = st.text_input("Enter YouTube URL")
+# -----------------------------
+# Inputs
+# -----------------------------
+video_id = st.text_input("YouTube Video ID", placeholder="Gfr50f6ZBvo")
+question = st.text_input("Ask your question")
 
-def extract_video_id(url):
-    if "youtu.be/" in url:
-        return url.split("/")[-1].split("?")[0]
-    if "v=" in url:
-        return url.split("v=")[1].split("&")[0]
-    return url
-
-# -----------------------
-# Build Vector DB
-# -----------------------
-@st.cache_resource
-def build_vector_store(video_id):
-    try:
-        api = YouTubeTranscriptApi()
-        transcript_list = api.fetch(video_id, languages=["en"])
-    except TranscriptsDisabled:
-        st.error("This video has no captions available.")
-        return None
-    except Exception as e:
-        st.error(f"Error fetching transcript: {e}")
-        return None
-
-    # flatten transcript to plain text
+# -----------------------------
+# Core Pipeline Functions
+# -----------------------------
+@st.cache_data(show_spinner=False)
+def fetch_transcript(video_id):
+    api = YouTubeTranscriptApi()
+    transcript_list = api.fetch(video_id, languages=["en"])
     transcript = " ".join(chunk.text for chunk in transcript_list)
+    return transcript
 
-    # Split text
+@st.cache_resource(show_spinner=False)
+def build_vector_store(transcript):
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     docs = splitter.create_documents([transcript])
-
-    # Embeddings
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+    store = FAISS.from_documents(docs, embeddings)
+    return store
 
-    # Create vector store
-    return FAISS.from_documents(docs, embeddings)
-
-# -----------------------
-# Ask question
-# -----------------------
-if url:
-    video_id = extract_video_id(url)
-    with st.spinner("Processing transcript..."):
-        vector_store = build_vector_store(video_id)
-        if vector_store is None:
-            st.stop()
-        retriever = vector_store.as_retriever()
-
-    question = st.text_input("Ask a question about this video")
-
-    if question:
-        docs = retriever.invoke(question)
-        context = "\n\n".join(doc.page_content for doc in docs)
-
-        prompt = f"""
-Answer ONLY from the context below.
-If not found, say 'Not in video'.
+def answer_question(store, question):
+    retriever = store.as_retriever(search_kwargs={"k": 4})
+    docs = retriever.invoke(question)
+    context = "\n\n".join(d.page_content for d in docs)
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
+    prompt = f"""
+Answer ONLY from the context.
+If answer not present say 'Not found in video'.
 
 Context:
 {context}
 
-Question:
-{question}
+Question: {question}
 """
+    result = llm.invoke(prompt)
+    return result.content
 
-        llm = ChatOpenAI(model="gpt-4o-mini")
-        answer = llm.invoke(prompt)
-        st.success(answer.content)
+# -----------------------------
+# Run Button
+# -----------------------------
+if st.button("Run"):
+    if not video_id or not question:
+        st.error("Enter video ID and question")
+        st.stop()
+
+    try:
+        with st.spinner("Fetching transcript..."):
+            transcript = fetch_transcript(video_id)
+
+        with st.spinner("Creating embeddings..."):
+            store = build_vector_store(transcript)
+
+        with st.spinner("Thinking..."):
+            answer = answer_question(store, question)
+
+        st.success("Answer:")
+        st.write(answer)
+
+    except TranscriptsDisabled:
+        st.error("Transcripts disabled for this video")
+    except Exception as e:
+        st.error(str(e))
