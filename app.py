@@ -1,45 +1,70 @@
 import os
 import streamlit as st
+
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import FAISS
 
-# -----------------------------
+# -----------------------
 # Page Config
-# -----------------------------
-st.set_page_config(page_title="YouTube RAG Bot", layout="wide")
-st.title("🎥 YouTube Video Q&A Bot (RAG)")
-st.write("Ask questions directly from any YouTube video's transcript.")
+# -----------------------
+st.set_page_config(page_title="YouTube RAG App", layout="wide")
+st.title("🎥 YouTube Video Q&A (RAG App)")
 
-# -----------------------------
-# API Key from Render ENV
-# -----------------------------
+st.write("Ask questions from YouTube videos. If YouTube is blocked, upload a transcript file instead.")
+
+# -----------------------
+# API Key
+# -----------------------
 api_key = os.getenv("OPENAI_API_KEY")
+
 if not api_key:
-    st.error("OPENAI_API_KEY not found! Set it in Render Environment Variables.")
+    st.error("OPENAI_API_KEY not found. Set it in Render Environment Variables.")
     st.stop()
-os.environ["OPENAI_API_KEY"] = api_key
 
-# -----------------------------
+# -----------------------
 # Inputs
-# -----------------------------
-video_id = st.text_input("YouTube Video ID", placeholder="Gfr50f6ZBvo")
-question = st.text_input("Ask your question")
+# -----------------------
+url = st.text_input("Enter YouTube URL")
+uploaded_file = st.file_uploader("Or upload transcript file (.txt)", type=["txt"])
+question = st.text_input("Ask a question about this video or transcript")
 
-# -----------------------------
+def extract_video_id(url):
+    if "youtu.be/" in url:
+        return url.split("/")[-1].split("?")[0]
+    if "v=" in url:
+        return url.split("v=")[1].split("&")[0]
+    return url
+
+# -----------------------
 # Core Pipeline Functions
-# -----------------------------
+# -----------------------
 @st.cache_data(show_spinner=False)
 def fetch_transcript(video_id):
-    api = YouTubeTranscriptApi()
-    transcript_list = api.fetch(video_id, languages=["en"])
-    transcript = " ".join(chunk.text for chunk in transcript_list)
-    return transcript
+    """
+    Fetch transcript from YouTube using the new API
+    """
+    try:
+        api = YouTubeTranscriptApi()
+        transcript_list = api.list(video_id)
+        # get English transcript, fallback to generated
+        transcript_obj = transcript_list.find_transcript(['en'])
+        transcript = " ".join(chunk.text for chunk in transcript_obj.fetch())
+        return transcript
+    except TranscriptsDisabled:
+        st.warning("Transcripts are disabled for this video")
+        return None
+    except Exception as e:
+        st.warning(f"Could not fetch from YouTube: {e}")
+        return None
 
 @st.cache_resource(show_spinner=False)
 def build_vector_store(transcript):
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200
+    )
     docs = splitter.create_documents([transcript])
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
     store = FAISS.from_documents(docs, embeddings)
@@ -62,28 +87,41 @@ Question: {question}
     result = llm.invoke(prompt)
     return result.content
 
-# -----------------------------
-# Run Button
-# -----------------------------
+# -----------------------
+# Run App
+# -----------------------
 if st.button("Run"):
-    if not video_id or not question:
-        st.error("Enter video ID and question")
+
+    if not api_key:
+        st.error("Set OPENAI_API_KEY in Render Environment Variables.")
         st.stop()
 
-    try:
-        with st.spinner("Fetching transcript..."):
+    if not question:
+        st.error("Enter a question")
+        st.stop()
+
+    transcript = None
+
+    # Priority 1: uploaded file
+    if uploaded_file:
+        transcript = uploaded_file.read().decode("utf-8")
+    
+    # Priority 2: YouTube URL
+    elif url:
+        video_id = extract_video_id(url)
+        with st.spinner("Fetching transcript from YouTube..."):
             transcript = fetch_transcript(video_id)
 
-        with st.spinner("Creating embeddings..."):
-            store = build_vector_store(transcript)
+    if not transcript:
+        st.error("No transcript available. Upload a file or try a different video.")
+        st.stop()
 
-        with st.spinner("Thinking..."):
-            answer = answer_question(store, question)
-
-        st.success("Answer:")
-        st.write(answer)
-
-    except TranscriptsDisabled:
-        st.error("Transcripts disabled for this video")
-    except Exception as e:
-        st.error(str(e))
+    # Build vector store and get answer
+    with st.spinner("Processing embeddings..."):
+        store = build_vector_store(transcript)
+    
+    with st.spinner("Thinking..."):
+        answer = answer_question(store, question)
+    
+    st.success("Answer:")
+    st.write(answer)
